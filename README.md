@@ -8,6 +8,13 @@ usage : bc64 inputfile /Ooutputfile /Llistfile /G
 If no output- or listfile is given, the defaultnames <inputbas>.cp  and <inputbase>.lst will be used.
 /G : this moves the output to $4000, so the $2000..$3fff area is free for graphics data in VIC bank 0
 
+I included a feature from the Blitz version for the C128 : forced integers. In BC64 you can use integer
+variables in a FOR loop, i.e FOR i% = 1 TO 100 STEP...
+You cannot test this before compiling though, as BASIC won't accept it. To overcome this problem, BC64 can
+force floating point variables to be treated as integers, using a special REM statement:
+REM **FI var,var,..
+So in the FOR example above, you would add "REM **FI I" to your BASIC program.(BEFORE the variable is used !)
+
 Sources are included, the .ZIP file contains the sources and the windows executable bc64.exe
 
 There's no makefile, as my development environment won't be the same as yours, but building the .exe is simple :
