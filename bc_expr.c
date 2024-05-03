@@ -318,6 +318,7 @@ void Primary(void)
     SynChk(')');
     GenByte(BL_CALLFN);
     GenWord((U16)ID,HIFIRST);
+    PushTypestack(T_NUM);
     return;
   }
   
