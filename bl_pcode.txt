@@ -1,0 +1,520 @@
+=======================================================================================================================
+ BC64 
+ A crosscompiler for the Blitz! runtime.
+ 
+ In the 1980's, when I was writing rather big BASIC programs, I relied heavely on the Blitz compiler.
+ It produced (and still produces) compact pseudocode (Pcode) that ran at an acceptable speed, specially
+ if integer (%) variables were used whenever possible. Now I do most BASIC development on my PC, using VICE,
+ so I decided to recreate Blitz as a crosscompiler.
+ 
+ Unfortunately, there's no documentation for the interpreter or the Pcode, at least not that I know of.
+ The compiler itself was written in BASIC, and if you wrote a disassembler for the compiled programs
+ (I did so myself, as have many others), you could also disassemble the compiler itself. But the
+ resulting BASIC program is almost impossible to decipher, with all its 2-character variables,GOTOs
+ and GOSUBs on every odd line and no comments or documentation.
+ 
+ I therefore decided to start with a blank sheet. I wrote numerous short testprograms, fed them through Blitz
+ (in VICE) and studied the output it produced. That finally enabled me to deduce the effect of the various
+ Pcode instructions and write a compiler for them.
+ 
+ To test this compiler, I downloaded various BASIC programs, mostly from CSDB, compiled them first with the
+ original Blitz compiler, then with BC64, and did binary comparisons of the outputs produced.
+ 
+ BC64 now produces exactly the same output as Blitz itself, as far as I've tested. I even found a valid BASIC
+ program that confused Blitz totally, so it stopped on errors, but compiled (and ran) perfectly with BC64.
+ 
+ I documented everything I now know about the pcodeinterpreter, for those interested.
+=======================================================================================================================
+ 
+ 
+ 
+ 
+=======================================================================================================================
+
+ About BC64
+ 
+ BC64 is a console application, written in plain C, It was developed under Windows, but Linux users should
+ have no problems compiling and linking it.
+ 
+ 
+
+
+
+
+=======================================================================================================================
+ Structure of a compiled program :
+=======================================================================================================================
+
+  _____________________________________________________________________________________________________________________
+  |           |      |       |     |        |     |     |            |     |          |
+  |           |      |       |     |        |     |     |            |     |          |
+  | RTLIB     | PTRS | ARRAY | $16 |  DATA  | $FF | $15 | PROG PCODE | $4F | VARTABLE |
+  | PCODE-INT.|      | INFO  |     |        |     |     |            |     |          |
+  |           |      |       |     |        |     |     |            |     |          |
+  |___________|______|_______|_____|________|_____|_____|____________|_____|__________|______________________________________
+  |           |      |                                                                |
+$0801      $1F93   $1F9F                                                             END
+
+
+
+RTLIB:         The runtime lib and pcode interpreter. Ends at $1F92. It contains some hardcoded info about
+               the location of the pointers (PTRS), so to add to it, it must be reassembled. It must start
+               at $0801, there are hardcoded addresses in it that requires this.
+               
+PTRS:          6 Pointers to various addresses in the program.Always starts at $1F93.     
+
+               PTR1 : Startaddress of VARTABLE 
+               PTR2 : End of VARTABLE, also end of program
+               PTR3 : Always same as PTR2. The runtime copies PTR1..PTR3 to zeropage locations
+                      $2D..$32, resp. VARTAB,ARYTAB,STREND, so PTR3 must equal PTR2
+               PTR4 : Start of ARRAY INFO. If there are no arrays in the source program, this points       
+                      to the $16 byte preceeding the DATA section
+               PTR5 : Start of DATA section. If there are no DATA statements, points to the terminating      
+                      $FF byte
+               PTR6 : Start of PROG PCODE       
+                      
+
+ARRAYINFO:     If the program contains arrays (either explicitly defined by a DIM statement or implicitly          
+               defined by just referring to them), this section is present. It is not data, but executable
+               Pcode, called in the initialisation phase of the program. It's a collection of DIM statements.
+               
+               First an integer array is created (DIM), with the name $DA $AA (Z*%,not accepted as a name in BASIC), 
+               defining the number of arrays in the program. Its size is 2 * (number of arrays).
+               It is filled in runtime with location info for the other arrays. 
+               Then, for each implicitly defined array, there's a DIM statement that always creates 
+               a one-dimensional array with 11 elements.
+               
+DATA:          If there are DATA statements in the program, the dataitems are all moved to here, in the format
+               L1 ... L2 ... (..) $FF
+               Lx is the length of an item, followed by the item itself, literally copied from the source program
+               Quotes around strings are NOT copied, and Lx may be zero if a DATA statement contains something
+               like DATA 0,, (nothing between comma's).
+               
+PROG PCODE:    The pcode generated for the BASIC statements in the source program. Excluding all DATA           
+               statements. The compiler always puts a pcode $15 (CLR) at the start and a $4F (END) at the end.
+               
+VARTABLE:      The BASIC's VARTAB is a hardcoded part of the compiled program. It's exactly the same as         
+               BASIC creates it : 2 bytes for the variablename, 5 bytes for the value.
+               It contains all scalars and DEF FN names. Names are also coded as in BASIC, using the high
+               bits (bit 7) of the name to indicate the type.
+               If the program contains no scalars, the original Blitz compiler still generates 7 $00 bytes here,
+               but doesn't take them into account in PTR2,PTR3.
+               
+               
+=======================================================================================================================
+ Variables and arrays
+=======================================================================================================================
+               
+The pcode interpreter refers to variables (including DEFFN names) and array by indexes in the runtime var-               
+and array tables. These indexes are determined at compile time, in order of appearance in the source program.
+As the program flow in BASIC can go everyway, it's unlikely that the variables would be created in the same order.
+That's the reason the VARTAB is created by the compiler and included in the compiled program; to force
+variables to stay at the place their indexes indicate.
+For Arrays that's not possible. Not only could including the array table dramatically increase the size of the compiled
+program, but it's impossible because 
+
+ a) arrays can be DIMensioned dynamically, e.g  X=100 : DIM A$(X) (*)
+ b) arrays can be redimensioned by executing a CLR and then redefine the array
+ 
+For that reason, the predefined array $DA $AA, mentioned above, exists. It contains (re)location info for each array,
+and can be altered at runtime.
+
+*) The Blitz! documentation, at least the version I have, states that dynamic dimensioning is not possible,
+   but the Blitz! compiler accepts it and it works fine.
+               
+               
+=======================================================================================================================               
+ The Blitz! Pcodes
+=======================================================================================================================
+
+_______________________________________________________________________________________________________________________
+
+$00            ???     Never seen it produced by the compiler
+_______________________________________________________________________________________________________________________
+
+
+_______________________________________________________________________________________________________________________
+
+$01 - $0F      Operators
+_______________________________________________________________________________________________________________________
+       
+               $01   >   (GTR)         used for numeric and string operands
+               $02   =   (EQL)                        ..
+               $03   >=  (GEQ)                        ..
+               $04   <   (LSS)                        ..
+               $05   <>  (NEQ)                        ..
+               $06   <=  (LEQ)                        ..
+               $07   +   (ADD)                        ..
+               $08   -   (SUB)         numeric operands only
+               $09   *   (MUL)
+               $0a   /   (DIV)
+               $0b   ^   (EXPN)        
+               $0c       (AND) 
+               $0d       (OR)
+               $0e   -   (UNARY MINUS)
+               $0f       (NOT)
+               
+               
+_______________________________________________________________________________________________________________________
+
+$10            DIM
+_______________________________________________________________________________________________________________________
+       
+
+               10 ND N1 N2 ID ID
+               
+               ND = nr. of dimensions
+               N1,
+               N2 = name of array
+               ID = identifier hi/lo : arraytable index * 2 + 7
+               
+               !! the dimension(s) of the array must be pushed before pcode 10 is executed, 1st dim first pushed
+               example : B2 B3 10 02 41 41 07 00  -> DIM AA(2,3), 2 dimensions  
+  
+_______________________________________________________________________________________________________________________
+  
+$11            FOR  (no STEP)
+_______________________________________________________________________________________________________________________
+
+               Procedure :
+                 - get ID loopvar (RefVar)
+                 - call Expression to generate code for initial value
+                 - store the initial value in the loopvar
+                 - check TO
+                 - call Expression to generate code for the limit
+                 - if STEP : call Expression to generate code for the stepvalue
+                 - call GenPushVarAddress with the ID of the loopvar
+                 - gen BL_FOR (or BL_FORSTEP)
+  
+               A0 xx 11     (A0 00 = push address var with index 0)
+  
+  
+_______________________________________________________________________________________________________________________
+
+$12            FORS  (with STEP)
+_______________________________________________________________________________________________________________________
+      
+      
+               See BL_FOR
+               A0 xx 12     (A0 00 = push address var with index 0)
+
+
+_______________________________________________________________________________________________________________________
+
+$13            NEXT (no loopvar)
+_______________________________________________________________________________________________________________________
+       
+               no params
+  
+_______________________________________________________________________________________________________________________
+  
+$14            NEXTV (with loopvar)  
+_______________________________________________________________________________________________________________________
+
+
+               A0 xx 14     (A0 xx = push address loopvar with index xx)
+               
+_______________________________________________________________________________________________________________________
+
+$15            CLR 
+_______________________________________________________________________________________________________________________
+       
+               no params
+               
+_______________________________________________________________________________________________________________________
+
+$16            DATA 
+_______________________________________________________________________________________________________________________
+       
+               no params      Generated by the compiler, never in a progam
+  
+               
+_______________________________________________________________________________________________________________________
+  
+$17            POKE 
+_______________________________________________________________________________________________________________________
+
+
+               value  address $17
+               ! first pokevalue, then address.
+               
+_______________________________________________________________________________________________________________________
+  
+$18            SYS                   
+_______________________________________________________________________________________________________________________
+
+
+               18 3A        Always compiled with a $3a byte following
+  
+
+_______________________________________________________________________________________________________________________
+  
+$19            GOTO
+_______________________________________________________________________________________________________________________
+
+               19 hh ll     hh,ll is absolute pcode address, HIFIRST
+  
+  
+_______________________________________________________________________________________________________________________
+  
+$1A            GOSUB
+_______________________________________________________________________________________________________________________
+
+               1A hh ll     hh,ll is absolute pcode address, HIFIRST
+  
+  
+_______________________________________________________________________________________________________________________
+  
+$1D            RETURN
+_______________________________________________________________________________________________________________________
+
+               no params
+               
+_______________________________________________________________________________________________________________________
+  
+$1E            RESTORE
+_______________________________________________________________________________________________________________________
+
+               no params
+               
+_______________________________________________________________________________________________________________________
+  
+$1F            IFNOT
+_______________________________________________________________________________________________________________________
+
+               Conditional jump, taken if IF expression is FALSE.
+               compile $1F offset  (1 byte)
+               For an IF statement, this is compiled with the next byte containg an offset to the next line.
+               Offset starts counting at the $1F byte, so an offset of 1 jumps the the offset itself.
+               ! IF statements may be compiled differently, depending on what follows after the IF or THEN.
+               Rfr to BL_IFGOTO ($52) or BL_IFRET ($58)
+               
+_______________________________________________________________________________________________________________________
+  
+$20 .. $36     BASIC internal functions
+_______________________________________________________________________________________________________________________
+
+               $20  SGN
+               $21  INT
+               $22  ABS   
+               $23  USR   
+               $24  FRE   
+               $25  POS   
+               $26  SQR   
+               $27  RND   
+               $28  LOG   
+               $29  EXP   
+               $2A  COS   
+               $2B  SIN   
+               $2C  TAN   
+               $2D  ATN   
+               $2E  PEEK  
+               $2F  LEN   
+               $30  STR$
+               $31  VAL   
+               $32  ASC   
+               $33  CHR$  
+               $34  LEFT$ 
+               $35  RIGHT$
+               $36  MID$  
+               
+               
+_______________________________________________________________________________________________________________________
+  
+$37            DEF FN
+_______________________________________________________________________________________________________________________
+
+
+               37 ID ID I2 I2 LL .. 39    
+  
+               ID = identifier lo/hi  : vartable index fnname * 7 + 2
+               I2 = identifier lo/hi  : vartable index fnname * 7 + 9
+               LL = total length entry, including opening 0x37 and terminating 0x39
+               .. = code generated by expression
+               
+               example : 37 02 00 09 00 0C 81 B2 09 81 07 39  ----- = code generated by expression. 0C = total length
+                                           --------------
+_______________________________________________________________________________________________________________________
+  
+$38            CALL DEF FN
+_______________________________________________________________________________________________________________________
+  
+  
+               38 ID ID     
+   
+               ID : as entered under 0x37
+               
+_______________________________________________________________________________________________________________________
+  
+$39            DEF FN END (of definition)
+_______________________________________________________________________________________________________________________
+
+
+               no params
+               
+_______________________________________________________________________________________________________________________
+  
+$3A            ???
+_______________________________________________________________________________________________________________________
+  
+  
+               Always compiled after $18, SYS. 
+               
+_______________________________________________________________________________________________________________________
+  
+$3B            PRINT , 
+_______________________________________________________________________________________________________________________
+
+
+               Prints nothing, sets the printposition to the next multiple of 10
+
+_______________________________________________________________________________________________________________________
+  
+$3C            PRINT ;
+_______________________________________________________________________________________________________________________
+
+
+               Prints contents of FAC1 (number or string), no CR following
+
+_______________________________________________________________________________________________________________________
+  
+$49            BL_STOP
+_______________________________________________________________________________________________________________________
+
+               no params
+               
+
+_______________________________________________________________________________________________________________________
+  
+$4A            BL_READSTR
+_______________________________________________________________________________________________________________________
+
+               Stack : the address of a string var, pushed with $8x or ..................
+               
+               The next DATA item is read into the var.
+               
+_______________________________________________________________________________________________________________________
+  
+$4B            BL_READNUM
+_______________________________________________________________________________________________________________________
+
+               Stack : the address of a numeric var, pushed with $A0 or $A1
+
+               The next DATA item is read into the var.
+
+_______________________________________________________________________________________________________________________
+  
+$4F            BL_END
+_______________________________________________________________________________________________________________________
+
+               $4F
+               The compiler always generates an END as the last byte of the program
+               
+_______________________________________________________________________________________________________________________
+  
+$80..$9F       BL_PUSHV   
+_______________________________________________________________________________________________________________________
+               
+               Pushes contents of var 0..1F. For strings this is an address, so BL_PUSHV is also
+               used when an address is needed.
+
+_______________________________________________________________________________________________________________________
+  
+$A0 xx         BL_PUSHA   
+_______________________________________________________________________________________________________________________
+
+               Pushes address of numeric variable with tableindex xx.
+               For strings, xx starts at 32, because they use $80..$9f to push an address.
+               However, this opcode also doubles as BL_PUSHV for indexes 32..255.
+               I guess the runtime can either use VARPTR or FAC1
+               
+_______________________________________________________________________________________________________________________
+  
+$A1 xx xx      BL_PUSHA2  
+_______________________________________________________________________________________________________________________
+
+               Pushes address of numeric variable with tableindex xx xx (LOFIRST)
+               However, this opcode also doubles as BL_PUSHV for indexes 256..512
+               I guess the runtime can either use VARPTR or FAC1
+               
+_______________________________________________________________________________________________________________________
+  
+$A4 xx         BL_PUSHARR 
+_______________________________________________________________________________________________________________________
+
+               Stack : indice(s) for array
+               Pushes address (or contents) of array element with tableindex xx
+               Like $A1 and $A2, used to get either address or value
+               
+_______________________________________________________________________________________________________________________
+  
+$A5 xx xx      BL_PUSHARR2
+_______________________________________________________________________________________________________________________
+
+               Stack : indice(s) for array
+               Pushes address (or contents) of array element with tableindex xx xx (LOFIRST)
+               Like $A1 and $A2, used to get either address or value
+               
+               
+_______________________________________________________________________________________________________________________
+  
+$AA            BL_PI
+_______________________________________________________________________________________________________________________
+
+               pushes PI
+               
+               
+_______________________________________________________________________________________________________________________
+  
+$AB            BL_ST
+_______________________________________________________________________________________________________________________
+
+               pushes ST
+               
+               
+_______________________________________________________________________________________________________________________
+  
+$AC            BL_TI
+_______________________________________________________________________________________________________________________
+
+               pushes TI
+               
+               
+_______________________________________________________________________________________________________________________
+  
+$AF            BL_TISTR
+_______________________________________________________________________________________________________________________
+
+               pushes TI$
+
+               
+               
+               
+$B0..$BF       BL_LOADC1         
+========
+               Loads constant int value 0..15
+
+
+$C0 ..         BL_STOVARI
+$DF 
+====
+               STORE tos into var (scalar), varindex 0..31
+               
+               
+
+0xe0 xx        BL_STOVARX
+====
+
+               STORE tos into var (scalar), varindex 32..255
+               
+               
+0xe4 xx        STORE tos into array with arrayindex xx. tos-1 etc. are indices
+========
+
+$F0..$FF       BL_LOADC2        
+========
+               Loads constant int value 16..31
+
+
+
+
